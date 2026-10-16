@@ -9,11 +9,18 @@ as context.
 This uses lightweight regexes rather than a full test-report parser to
 keep Phase 1 dependency-free. It's intentionally permissive: it's fine to
 over-collect a few extra files, the LLM will sort out what's relevant.
+
+On top of the file list, a stdlib-only AST pass pins each failure location
+(file:line) to its enclosing function/class and, for failing tests, follows
+called ``from module import symbol`` names to their local definitions. These
+come back as ``focus`` snippets next to the full file content.
 """
 
+import ast
 import os
 import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 # pytest short summary line: "FAILED tests/test_foo.py::test_bar - AssertionError"
 PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(\S+?)(?:::\S+)?\s", re.MULTILINE)
@@ -23,6 +30,12 @@ TRACEBACK_FILE_RE = re.compile(r'File "([^"]+)", line (\d+)')
 
 # Node/Jest style: "at Object.<anonymous> (/app/src/foo.js:12:5)"
 JS_STACK_RE = re.compile(r"\(?(/app/[^\s:()]+\.[jt]sx?):(\d+):(\d+)\)?")
+
+# pytest location lines: "tax.py:6: ZeroDivisionError" / "/app/tests/test_x.py:5: in test_x"
+FILE_LINE_RE = re.compile(r"(?P<path>(?:/app/)?[A-Za-z0-9_./\\-]+\.py):(?P<line>\d+)")
+
+# AST nodes that can enclose a failure line
+CALLABLES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
 def _strip_app_prefix(path: str) -> str:
@@ -147,20 +160,226 @@ def _local_imports(file_content: str, repo_path: str) -> set[str]:
     return found
 
 
-def extract_failure_context(repo_path: str, test_output: str, max_chars: int = 6000) -> list[dict]:
-    """Returns a list of {"path": rel_path, "content": str} for every
-    implicated file that actually exists in the local repo, plus any local
-    modules those files import (see _local_imports). The workflow prefers a
-    freshly-generated JUnit XML report when present, but still falls back to
-    raw pytest output parsing if needed."""
+# --- AST focus pass ----------------------------------------------------------
+# Read-only, stdlib only. Adapted from the standalone ast_context_probe.py.
+
+
+def _locations_from_text(text: str) -> set[tuple[str, int]]:
+    found = set()
+    for m in TRACEBACK_FILE_RE.finditer(text):
+        found.add((m.group(1), int(m.group(2))))
+    for m in FILE_LINE_RE.finditer(text):
+        found.add((m.group("path"), int(m.group("line"))))
+    return found
+
+
+def _locations_from_junit_xml(xml_text: str) -> set[tuple[str, int]]:
+    """Read Python file/line locations from JUnit failure/error entries."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return set()
+
+    found: set[tuple[str, int]] = set()
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] not in {"failure", "error"}:
+            continue
+
+        found |= _locations_from_text(" ".join(node.itertext()))
+
+        path, line = node.get("file"), node.get("line")
+        if path and line and line.isdigit():
+            found.add((path, int(line)))
+    return found
+
+
+def find_failing_locations(test_output: str) -> set[tuple[str, int]]:
+    """(path, line) pairs, from JUnit XML failure entries when available,
+    otherwise from raw pytest output text."""
+    if "<testsuite" in test_output or "<?xml" in test_output:
+        found = _locations_from_junit_xml(test_output)
+        if found:
+            return found
+    return _locations_from_text(test_output)
+
+
+def _local_path(repo: Path, reported_path: str) -> Path | None:
+    """Resolve /app or relative report paths, rejecting paths outside repo."""
+    if "site-packages" in reported_path:
+        return None
+    path = reported_path.removeprefix("/app/")
+    candidate = Path(path) if Path(path).is_absolute() else repo / path
+
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(repo.resolve())
+    except (OSError, ValueError):
+        return None
+
+    return resolved if resolved.is_file() and resolved.suffix == ".py" else None
+
+
+def _parse_python(path: Path) -> tuple[str, ast.Module] | None:
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        return source, ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError):
+        return None
+
+
+def _enclosing_callable(tree: ast.AST, line: int) -> ast.AST | None:
+    """Return the smallest function/class AST node containing this line."""
+    matches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, CALLABLES)
+        and node.lineno <= line <= getattr(node, "end_lineno", node.lineno)
+    ]
+    return min(
+        matches,
+        key=lambda node: getattr(node, "end_lineno", node.lineno) - node.lineno,
+        default=None,
+    )
+
+
+def _node_snippet(label: str, source: str, node: ast.AST) -> dict:
+    lines = source.splitlines()
+    start = min(
+        [node.lineno]
+        + [decorator.lineno for decorator in getattr(node, "decorator_list", [])]
+    )
+    end = getattr(node, "end_lineno", node.lineno)
+    return {
+        "label": label,
+        "start": start,
+        "end": end,
+        "source": "\n".join(lines[start - 1 : end]),
+    }
+
+
+def _resolve_module(repo: Path, module: str) -> Path | None:
+    """Resolve a dotted import to a local module or package __init__.py."""
+    parts = module.split(".")
+    module_file = repo.joinpath(*parts).with_suffix(".py")
+    package_file = repo.joinpath(*parts, "__init__.py")
+
+    for candidate in (module_file, package_file):
+        if candidate.is_file():
+            try:
+                candidate.resolve().relative_to(repo.resolve())
+            except ValueError:
+                continue
+            return candidate.resolve()
+    return None
+
+
+def _imported_definitions(
+    repo: Path, test_tree: ast.Module, test_function: ast.AST
+) -> list[tuple[Path, str]]:
+    """Resolve called names imported into the failing test to local definitions."""
+    called_names = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(test_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    targets: set[tuple[Path, str]] = set()
+
+    for node in ast.walk(test_tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module or node.level:
+            continue
+
+        module_path = _resolve_module(repo, node.module)
+        if not module_path:
+            continue
+
+        for alias in node.names:
+            bound_name = alias.asname or alias.name
+            if alias.name != "*" and bound_name in called_names:
+                targets.add((module_path, alias.name))
+
+    return sorted(targets, key=lambda item: (str(item[0]), item[1]))
+
+
+def _collect_ast_focus(repo_path: str, locations: set[tuple[str, int]]) -> dict[str, list[dict]]:
+    """Map rel_path -> [snippet, ...]: the function/class enclosing each failure
+    line, plus (for failing tests) definitions of imported names the test calls."""
+    repo = Path(repo_path).resolve()
+    focus: dict[str, list[dict]] = {}
+    seen: set[tuple[str, int, int]] = set()
+
+    def add(path: Path, snippet: dict) -> None:
+        rel = path.relative_to(repo).as_posix()
+        key = (rel, snippet["start"], snippet["end"])
+        if key not in seen:
+            seen.add(key)
+            focus.setdefault(rel, []).append(snippet)
+
+    for reported_path, line in sorted(locations):
+        path = _local_path(repo, reported_path)
+        if path is None:
+            continue
+
+        parsed = _parse_python(path)
+        if not parsed:
+            continue
+        source, tree = parsed
+        node = _enclosing_callable(tree, line)
+        if node is None:
+            continue
+        add(path, _node_snippet("Enclosing AST node", source, node))
+
+        # For a failing test, follow called `from module import symbol` names
+        # to their definitions in the local repository.
+        if "test" not in path.name.lower():
+            continue
+
+        for module_path, symbol in _imported_definitions(repo, tree, node):
+            target = _parse_python(module_path)
+            if not target:
+                continue
+            target_source, target_tree = target
+            definition = next(
+                (
+                    item
+                    for item in ast.walk(target_tree)
+                    if isinstance(item, CALLABLES) and item.name == symbol
+                ),
+                None,
+            )
+            if definition:
+                add(
+                    module_path,
+                    _node_snippet(f"Imported definition {symbol}", target_source, definition),
+                )
+    return focus
+
+
+def extract_failure_context(repo_path: str, test_output: str) -> list[dict]:
+    """Returns a list of {"path": rel_path, "content": str, "focus": [...]} for
+    every implicated file that actually exists in the local repo, plus any local
+    modules those files import (see _local_imports). ``content`` is the full
+    file; ``focus`` holds the AST snippets for that file (may be empty). The
+    workflow prefers a freshly-generated JUnit XML report when present, but still
+    falls back to raw pytest output parsing if needed."""
     rel_paths = set()
+    locations = set()
 
     report_path = os.path.join(repo_path, "report.xml")
     if os.path.isfile(report_path):
         with open(report_path, "r", errors="replace") as f:
-            rel_paths |= find_failing_files(f.read())
+            report_text = f.read()
+        rel_paths |= find_failing_files(report_text)
+        locations |= find_failing_locations(report_text)
 
     rel_paths |= find_failing_files(test_output)
+    locations |= find_failing_locations(test_output)
+
+    # AST pass: failure line -> enclosing function/class (+ imported definitions
+    # for failing tests). Files it finds join the set so they get the same
+    # import expansion below.
+    focus = _collect_ast_focus(repo_path, locations)
+    rel_paths |= set(focus)
 
     # Expand with local imports found inside the already-identified files
     # (handles e.g. a test file whose imported implementation module never
@@ -177,5 +396,5 @@ def extract_failure_context(repo_path: str, test_output: str, max_chars: int = 6
         if os.path.isfile(abs_path):
             with open(abs_path, "r", errors="replace") as f:
                 content = f.read()
-            contexts.append({"path": rel_path, "content": content[:max_chars]})
+            contexts.append({"path": rel_path, "content": content, "focus": focus.get(rel_path, [])})
     return contexts
