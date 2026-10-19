@@ -48,3 +48,14 @@ def test_not_found_message_shows_closest_real_lines(tmp_path):
 
     assert result["success"] is False
     assert "line 1: def f(a, b):" in result["output"]
+
+
+def test_edits_to_test_files_are_rejected(tmp_path):
+    (tmp_path / "tests").mkdir()
+    test_file = tmp_path / "tests" / "test_calc.py"
+    test_file.write_text("assert add(1, 1) == 2\n")
+
+    result = apply_patch(str(tmp_path), "tests/test_calc.py", "== 2", "== 3")
+
+    assert result["success"] is False and "test files must not be modified" in result["output"]
+    assert test_file.read_text() == "assert add(1, 1) == 2\n"

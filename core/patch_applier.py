@@ -19,6 +19,11 @@ def _closest_lines(text: str, old: str) -> str:
     return ". Closest lines actually in the file:\n" + "\n".join(hits[:3]) if hits else ""
 
 
+def _is_test_file(file_path: str) -> bool:
+    parts = os.path.normpath(file_path).split(os.sep)
+    return "tests" in parts[:-1] or "test" in parts[:-1] or parts[-1].startswith("test_")
+
+
 def apply_patch(
     repo_path: str, file_path: str, old: str, new: str, patch_name: str = "fix.patch"
 ) -> dict:
@@ -28,6 +33,9 @@ def apply_patch(
 
     if not target.startswith(os.path.realpath(repo_path) + os.sep) or not os.path.isfile(target):
         return {**result, "output": f"File not found in repo: {file_path}"}
+
+    if _is_test_file(file_path):
+        return {**result, "output": f"Edit to {file_path} rejected: test files must not be modified. Fix the source code instead."}
 
     if "".join(old.split()) == "".join(new.split()):
         return {**result, "output": f"Edit to {file_path} is a no-op (new equals old, ignoring whitespace); make a real change."}
