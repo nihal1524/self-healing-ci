@@ -144,7 +144,11 @@ def build_workflow(
                 print(f"    Applied via {result['method']} -> {result['patch_file']}")
             else:
                 any_failed = True
-                print(f"    Failed to apply patch:\n{result.get('output', '')}")
+                print(f"    Failed to apply patch ({result.get('method')}):\n{result.get('output', '')}")
+                if result.get("git_apply_error"):
+                    print(f"    git apply error:\n{result['git_apply_error']}")
+                print(f"    Patch file kept at: {result.get('patch_file')}")
+                print(f"    Rejected diff:\n{patch.unified_diff}")
 
         if any_failed:
             message = "One or more patches failed to apply. Stopping."
