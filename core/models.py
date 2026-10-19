@@ -18,13 +18,14 @@ class ProposedPatch(BaseModel):
         ...,
         description="Short explanation of why this change fixes the failing test.",
     )
-    unified_diff: str = Field(
+    old: str = Field(
         ...,
         description=(
-            "A complete unified diff (git-style, with --- / +++ / @@ headers) "
-            "that can be applied with `git apply` or `patch -p1` from the repo root."
+            "Exact text to replace, copied verbatim from the file (including "
+            "indentation). It must appear exactly once in the file."
         ),
     )
+    new: str = Field(..., description="Text that replaces `old`.")
 
 
 class PatchPlan(BaseModel):

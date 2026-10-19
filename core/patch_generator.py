@@ -18,20 +18,34 @@ automated self-healing CI pipeline. You will be given the output of a \
 failing test run and the current contents of the source file(s) involved.
 
 Diagnose the root cause and produce the SMALLEST correct fix. Respond only \
-by calling the submit_patch_plan tool. Each unified_diff must:
-  - start with '--- a/<path>' and '+++ b/<path>' headers
-  - use the exact relative file path given in the context
-  - apply cleanly with `git apply` from the repository root
-  - contain only the minimal hunks needed to fix the failure
+by calling the submit_patch_plan tool. Each patch is a search/replace edit:
+  - file_path is the exact relative path given in the context
+  - old is text copied verbatim from that file (same indentation), and must \
+appear exactly once. Use the SMALLEST snippet that is unique -- ideally a \
+single line next to where you want to change code. Never retype lines you \
+are not changing; do not invent code that is not shown in the file.
+  - new must differ from old in more than whitespace
+  - new is the text that replaces old
+  - keep edits minimal
 
 Do not modify the test file unless the test itself is provably wrong.
 """
+
+
+def format_context(c: dict) -> str:
+    """One file block: AST focus snippets (most relevant code) first, then the full file."""
+    focus = "".join(
+        f"[Most relevant: {f['label']}, lines {f['start']}-{f['end']}]\n{f['source']}\n\n"
+        for f in c.get("focus", [])
+    )
+    return f"--- FILE: {c['path']} ---\n{focus}[Full file]\n{c['content']}"
 
 
 def generate_patch(
     test_output: str,
     file_contexts: list[dict],
     model: str = "claude-sonnet-4-5-20250929",
+    feedback: str = "",
 ) -> PatchPlan:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -39,9 +53,7 @@ def generate_patch(
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    context_text = "\n\n".join(
-        f"--- FILE: {c['path']} ---\n{c['content']}" for c in file_contexts
-    )
+    context_text = "\n\n".join(format_context(c) for c in file_contexts)
 
     tool = {
         "name": "submit_patch_plan",
@@ -61,7 +73,8 @@ def generate_patch(
                 "content": (
                     f"Failing test output:\n```\n{test_output[-6000:]}\n```\n\n"
                     f"Relevant source files:\n{context_text}\n\n"
-                    "Diagnose and produce a patch."
+                    + (f"Earlier attempts that did not fix it:\n{feedback}\n\n" if feedback else "")
+                    + "Diagnose and produce a patch."
                 ),
             }
         ],

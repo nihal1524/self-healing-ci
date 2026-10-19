@@ -33,7 +33,7 @@ def sample_plan():
             ProposedPatch(
                 file_path="calculator.py",
                 explanation="Correct the operation.",
-                unified_diff="--- a/calculator.py\n+++ b/calculator.py\n",
+                old="a", new="b",
             )
         ],
     )
@@ -119,21 +119,28 @@ def test_missing_context_stops_before_model_call():
     assert generated == []
 
 
-def test_patch_application_failure_stops_without_retrying_tests():
+def test_patch_application_failure_retries_with_feedback_then_stops():
     runner = FakeRunner([failed()])
+    feedbacks = []
+
+    def generator(*args, **kwargs):
+        feedbacks.append(kwargs["feedback"])
+        return sample_plan()
 
     state = run_with(
         runner,
         context_extractor=lambda *_: [{"path": "calculator.py", "content": "..."}],
-        patch_generator=lambda *args, **kwargs: sample_plan(),
+        patch_generator=generator,
         patch_applier=lambda *args, **kwargs: {
             "success": False,
-            "output": "diff did not apply",
+            "output": "snippet not found",
         },
     )
 
     assert state["status"] == "patch_error"
     assert runner.calls == 1
+    assert len(feedbacks) == 2
+    assert feedbacks[0] == "" and "snippet not found" in feedbacks[1]
 
 
 def test_business_repo_multi_file_context_and_fix_loop():
@@ -182,12 +189,12 @@ pricing.py:53: in calculate_order
             ProposedPatch(
                 file_path="pricing.py",
                 explanation="Use pre-discount subtotal for free shipping and keep Decimal rounding consistent.",
-                unified_diff="--- a/pricing.py\n+++ b/pricing.py\n@@\n-    shipping = (\n-        Decimal(0)\n-        if subtotal >= free_shipping_threshold\n-        else shipping_fee\n-    )\n+    shipping = (\n+        Decimal(0)\n+        if subtotal >= free_shipping_threshold\n+        else shipping_fee\n+    )\n",
+                old="a", new="b",
             ),
             ProposedPatch(
                 file_path="tests/test_pricing.py",
                 explanation="Include a richer assertion context for the shipping regression.",
-                unified_diff="--- a/tests/test_pricing.py\n+++ b/tests/test_pricing.py\n@@\n-    assert result[\"shipping\"] == Decimal(\"0.00\")\n+    assert result[\"shipping\"] == Decimal(\"0.00\")\n",
+                old="a", new="b",
             ),
         ],
     )

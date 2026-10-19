@@ -22,6 +22,8 @@ class WorkflowState(TypedDict):
     tests_passed: bool
     contexts: list[dict[str, str]]
     patch_plan: PatchPlan | None
+    feedback: str
+    apply_failures: int
     status: str
     error: str | None
 
@@ -106,7 +108,10 @@ def build_workflow(
         print(f"Asking {state['model']} to diagnose and propose a fix...")
         try:
             plan = patch_generator(
-                state["test_output"], state["contexts"], model=state["model"]
+                state["test_output"],
+                state["contexts"],
+                model=state["model"],
+                feedback=state["feedback"],
             )
         except Exception as exc:
             message = f"LLM call failed: {exc}"
@@ -126,42 +131,47 @@ def build_workflow(
             return {"status": "patch_error", "error": message}
 
         patch_attempt = state["fixes_used"] + 1
-        any_failed = False
         for index, patch in enumerate(plan.patches, start=1):
             print(f"\n[{index}/{len(plan.patches)}] Patching {patch.file_path}")
             print(f"    Why: {patch.explanation}")
             try:
                 result = patch_applier(
                     state["repo_path"],
-                    patch.unified_diff,
+                    patch.file_path,
+                    patch.old,
+                    patch.new,
                     patch_name=f"attempt{patch_attempt}_{index}.patch",
                 )
             except Exception as exc:
-                any_failed = True
-                print(f"    Patch application raised an error: {exc}")
-                continue
+                result = {"success": False, "output": f"Patch application raised an error: {exc}"}
             if result.get("success"):
-                print(f"    Applied via {result['method']} -> {result['patch_file']}")
-            else:
-                any_failed = True
-                print(f"    Failed to apply patch ({result.get('method')}):\n{result.get('output', '')}")
-                if result.get("git_apply_error"):
-                    print(f"    git apply error:\n{result['git_apply_error']}")
-                print(f"    Patch file kept at: {result.get('patch_file')}")
-                print(f"    Rejected diff:\n{patch.unified_diff}")
+                print(f"    Applied -> {result['patch_file']}")
+                continue
 
-        if any_failed:
-            message = "One or more patches failed to apply. Stopping."
-            print(f"\n{message}")
-            return {"status": "patch_error", "error": message}
+            error = result.get("output", "")
+            print(f"    {error}\n    Rejected snippet:\n{patch.old}")
+            failures = state["apply_failures"] + 1
+            feedback = state["feedback"] + (
+                f"- Edit to {patch.file_path} could not be applied: {error}\n"
+                f"  old snippet was:\n{patch.old}\n"
+            )
+            if failures >= state["max_attempts"]:
+                message = "Patch failed to apply and no attempts are left. Stopping."
+                print(f"\n{message}")
+                return {"status": "patch_error", "error": message, "apply_failures": failures}
+            return {"status": "patch_retry", "feedback": feedback, "apply_failures": failures}
 
+        feedback = state["feedback"] + f"- Attempt {patch_attempt}: {plan.root_cause} (applied, tests still failed)\n"
         return {
             "fixes_used": patch_attempt,
             "status": "patches_applied",
+            "feedback": feedback,
             "error": None,
         }
 
     def route_after_apply(state: WorkflowState) -> str:
+        if state["status"] == "patch_retry":
+            return "extract"
         return "run_tests" if state["status"] == "patches_applied" else "done"
 
     graph = StateGraph(WorkflowState)
@@ -191,7 +201,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "apply_plan",
         route_after_apply,
-        {"run_tests": "run_tests", "done": END},
+        {"run_tests": "run_tests", "extract": "extract_context", "done": END},
     )
     return graph.compile()
 
@@ -216,6 +226,8 @@ def run_workflow(
             "tests_passed": False,
             "contexts": [],
             "patch_plan": None,
+            "feedback": "",
+            "apply_failures": 0,
             "status": "started",
             "error": None,
         }
