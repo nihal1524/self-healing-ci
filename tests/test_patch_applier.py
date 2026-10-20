@@ -1,20 +1,61 @@
 from core.patch_applier import apply_patch
 
 
-def test_stale_patch_is_rejected_without_changing_target(tmp_path):
+def test_edit_replaces_unique_snippet(tmp_path):
     target = tmp_path / "calculator.py"
-    original = "def add(a, b):\n    return 7\n"
-    target.write_text(original)
-    stale_diff = """--- a/calculator.py
-+++ b/calculator.py
-@@ -1,2 +1,2 @@
- def add(a, b):
--    return 1
-+    return 2
-"""
+    target.write_text("def add(a, b):\n    return 1\n")
 
-    result = apply_patch(str(tmp_path), stale_diff, patch_name="stale.patch")
+    result = apply_patch(str(tmp_path), "calculator.py", "return 1", "return a + b", "fix.patch")
+
+    assert result["success"] is True
+    assert target.read_text() == "def add(a, b):\n    return a + b\n"
+    assert "+    return a + b" in (tmp_path / "fix.patch").read_text()
+
+
+def test_missing_or_ambiguous_snippet_is_rejected_without_changing_target(tmp_path):
+    target = tmp_path / "calculator.py"
+    original = "x = 1\ny = 1\n"
+    target.write_text(original)
+
+    missing = apply_patch(str(tmp_path), "calculator.py", "z = 1", "z = 2")
+    ambiguous = apply_patch(str(tmp_path), "calculator.py", " = 1", " = 2")
+
+    assert missing["success"] is False and "not found" in missing["output"]
+    assert ambiguous["success"] is False and "2 places" in ambiguous["output"]
+    assert target.read_text() == original
+
+
+def test_path_outside_repo_is_rejected(tmp_path):
+    (tmp_path / "outside.py").write_text("a")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert apply_patch(str(repo), "../outside.py", "a", "b")["success"] is False
+
+
+def test_noop_edit_is_rejected(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    result = apply_patch(str(tmp_path), "a.py", "x = 1", "x =  1")
+
+    assert result["success"] is False and "no-op" in result["output"]
+
+
+def test_not_found_message_shows_closest_real_lines(tmp_path):
+    (tmp_path / "a.py").write_text("def f(a, b):\n    return a\n")
+
+    result = apply_patch(str(tmp_path), "a.py", "def f(a, b, c=None):", "def f(a):")
 
     assert result["success"] is False
-    assert target.read_text() == original
-    assert (tmp_path / "stale.patch").is_file()
+    assert "line 1: def f(a, b):" in result["output"]
+
+
+def test_edits_to_test_files_are_rejected(tmp_path):
+    (tmp_path / "tests").mkdir()
+    test_file = tmp_path / "tests" / "test_calc.py"
+    test_file.write_text("assert add(1, 1) == 2\n")
+
+    result = apply_patch(str(tmp_path), "tests/test_calc.py", "== 2", "== 3")
+
+    assert result["success"] is False and "test files must not be modified" in result["output"]
+    assert test_file.read_text() == "assert add(1, 1) == 2\n"

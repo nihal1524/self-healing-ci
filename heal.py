@@ -53,7 +53,7 @@ def main():
         help="Maximum patch attempts (plus one final verification run)",
     )
     parser.add_argument(
-        "--model", default="claude-sonnet-4-5-20250929", help="Anthropic model to use for patch generation"
+        "--model", default="claude-sonnet-5-5", help="Anthropic model to use for patch generation"
     )
     args = parser.parse_args()
 
@@ -98,7 +98,7 @@ def main():
         print(f"Workflow failed unexpectedly: {e}")
         sys.exit(1)
 
-    if final_state["status"] != "success":
+    if final_state["status"] not in ("success", "already_passing"):
         if final_state.get("error"):
             print(f"\n❌ {final_state['error']}")
         sys.exit(1)
