@@ -60,13 +60,18 @@ def build_workflow(
         exit_code = result.get("exit_code", 1)
         tests_passed = bool(result.get("success", False))
         print(output[-3000:])
-        if tests_passed:
+        status = "tests_failed"
+        if tests_passed and fixes_used == 0:
+            status = "already_passing"
+            print("\n⚠️ Tests passed on the first run: failure not reproduced, no fix needed.")
+        elif tests_passed:
+            status = "success"
             print("\n✅ Tests passed!")
         return {
             "test_output": output,
             "exit_code": exit_code,
             "tests_passed": tests_passed,
-            "status": "success" if tests_passed else "tests_failed",
+            "status": status,
             "error": None,
         }
 

@@ -3,9 +3,9 @@ LLM call: pass the error output + file content to Claude and get back a
 PatchPlan (Pydantic model) via structured output.
 
 We implement "structured outputs via Pydantic" by handing Claude the
-PatchPlan JSON schema as a tool definition and forcing tool_choice, so the
-API response is guaranteed to match the schema (or the call errors out) --
-no fragile prompt-and-hope JSON parsing.
+PatchPlan JSON schema as a tool definition (tool_choice "auto" -- this model
+rejects forced tool calls; the prompt requires the tool call and we error out
+if it is missing), so we never regex-parse free text.
 """
 
 import os
@@ -44,7 +44,7 @@ def format_context(c: dict) -> str:
 def generate_patch(
     test_output: str,
     file_contexts: list[dict],
-    model: str = "claude-sonnet-4-5-20250929",
+    model: str = "claude-sonnet-5-5",
     feedback: str = "",
 ) -> PatchPlan:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -66,7 +66,7 @@ def generate_patch(
         max_tokens=4000,
         system=SYSTEM_PROMPT,
         tools=[tool],
-        tool_choice={"type": "tool", "name": "submit_patch_plan"},
+        tool_choice={"type": "auto"},
         messages=[
             {
                 "role": "user",

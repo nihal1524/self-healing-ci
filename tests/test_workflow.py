@@ -58,7 +58,7 @@ def test_initial_passing_tests_finish_without_repair():
         patch_generator=lambda *args, **kwargs: generated.append(True),
     )
 
-    assert state["status"] == "success"
+    assert state["status"] == "already_passing"
     assert runner.calls == 1
     assert generated == []
 
