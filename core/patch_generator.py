@@ -13,6 +13,8 @@ import anthropic
 
 from .models import PatchPlan
 
+MAX_TOOL_ATTEMPTS = 3
+
 SYSTEM_PROMPT = """You are an expert software engineer operating inside an \
 automated self-healing CI pipeline. You will be given the output of a \
 failing test run and the current contents of the source file(s) involved.
@@ -61,27 +63,36 @@ def generate_patch(
         "input_schema": PatchPlan.model_json_schema(),
     }
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
-        tools=[tool],
-        tool_choice={"type": "auto"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Failing test output:\n```\n{test_output[-6000:]}\n```\n\n"
-                    f"Relevant source files:\n{context_text}\n\n"
-                    + (f"Earlier attempts that did not fix it:\n{feedback}\n\n" if feedback else "")
-                    + "Diagnose and produce a patch."
-                ),
-            }
-        ],
+    prompt = (
+        f"Failing test output:\n```\n{test_output[-6000:]}\n```\n\n"
+        f"Relevant source files:\n{context_text}\n\n"
+        + (f"Earlier attempts that did not fix it:\n{feedback}\n\n" if feedback else "")
+        + "Diagnose and produce a patch."
     )
 
-    for block in message.content:
-        if block.type == "tool_use" and block.name == "submit_patch_plan":
-            return PatchPlan.model_validate(block.input)
+    problem = ""
+    for attempt in range(1, MAX_TOOL_ATTEMPTS + 1):
+        message = client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=SYSTEM_PROMPT,
+            tools=[tool],
+            tool_choice={"type": "auto"},
+            messages=[{"role": "user", "content": prompt + problem}],
+        )
+        call = next(
+            (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
+            None,
+        )
+        try:
+            if call is None:
+                raise ValueError("no submit_patch_plan tool call was returned")
+            return PatchPlan.model_validate(call.input)
+        except ValueError as exc:  # pydantic.ValidationError is a ValueError
+            print(f"    Invalid model response (try {attempt}/{MAX_TOOL_ATTEMPTS}): {str(exc).splitlines()[0]}")
+            problem = (
+                f"\n\nYour previous response was invalid: {exc}\n"
+                "Call submit_patch_plan again with `patches` as a JSON list of objects."
+            )
 
-    raise RuntimeError("Model did not return the expected submit_patch_plan tool call")
+    raise RuntimeError(f"Model did not return a valid submit_patch_plan call after {MAX_TOOL_ATTEMPTS} tries")
