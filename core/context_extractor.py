@@ -12,7 +12,8 @@ over-collect a few extra files, the LLM will sort out what's relevant.
 
 On top of the file list, a stdlib-only AST pass pins each failure location
 (file:line) to its enclosing function/class and, for failing tests, follows
-called ``from module import symbol`` names to their local definitions. These
+called ``from module import symbol`` names (and ``obj.method`` uses, by name)
+to their local definitions. These
 come back as ``focus`` snippets next to the full file content.
 """
 
@@ -301,6 +302,51 @@ def _imported_definitions(
     return sorted(targets, key=lambda item: (str(item[0]), item[1]))
 
 
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "build", "dist", "__pycache__", "tests", "test"}
+MAX_METHOD_MATCHES = 3
+
+
+def _method_definitions(repo: Path, test_tree: ast.Module, test_function: ast.AST) -> list[tuple]:
+    """Resolve ``obj.method`` uses (calls or references) in a failing test to ``def method`` in repo source.
+
+    Matching is by name only. Definitions in modules the test imports win; otherwise a
+    name defined in more than MAX_METHOD_MATCHES places is too generic and is skipped.
+    """
+    names = {node.attr for node in ast.walk(test_function) if isinstance(node, ast.Attribute)}
+    imported = {
+        module_path
+        for node in ast.walk(test_tree)
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level
+        for module_path in [_resolve_module(repo, node.module)]
+        if module_path
+    }
+    found: dict[str, list[tuple]] = {name: [] for name in names}
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for filename in files:
+            path = Path(root) / filename
+            if not filename.endswith(".py") or filename.startswith("test_"):
+                continue
+            parsed = _parse_python(path)
+            if not parsed or not any(f"def {name}(" in parsed[0] for name in names):
+                continue
+            source, tree = parsed
+            for cls in ast.walk(tree):
+                if isinstance(cls, ast.ClassDef):
+                    for item in cls.body:
+                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in names:
+                            found[item.name].append((path.resolve(), f"Method {cls.name}.{item.name}", source, item))
+
+    chosen: list[tuple] = []
+    for matches in found.values():
+        preferred = [m for m in matches if m[0] in imported]
+        if preferred:
+            chosen += preferred[:MAX_METHOD_MATCHES]
+        elif len(matches) <= MAX_METHOD_MATCHES:
+            chosen += matches
+    return chosen
+
+
 def _collect_ast_focus(repo_path: str, locations: set[tuple[str, int]]) -> dict[str, list[dict]]:
     """Map rel_path -> [snippet, ...]: the function/class enclosing each failure
     line, plus (for failing tests) definitions of imported names the test calls."""
@@ -352,6 +398,9 @@ def _collect_ast_focus(repo_path: str, locations: set[tuple[str, int]]) -> dict[
                     module_path,
                     _node_snippet(f"Imported definition {symbol}", target_source, definition),
                 )
+
+        for module_path, label, method_source, method in _method_definitions(repo, tree, node):
+            add(module_path, _node_snippet(label, method_source, method))
     return focus
 
 

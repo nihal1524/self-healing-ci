@@ -115,3 +115,52 @@ def test_missing_and_relative_imports_do_not_escape_or_add_files(tmp_path):
     paths = {item["path"] for item in contexts}
 
     assert paths == {"tests/test_local.py"}
+
+
+def _method_repo(tmp_path, definitions, test_imports=""):
+    (tmp_path / "pkg").mkdir()
+    for name, body in definitions.items():
+        (tmp_path / "pkg" / f"{name}.py").write_text(body)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        f"{test_imports}\n\ndef test_x():\n    obj = make()\n    obj.follow(None)\n    obj.assertEqual(1, 1)\n"
+    )
+    output = '  File "/app/tests/test_x.py", line 5, in test_x\n    obj.follow(None)\n'
+    return {c["path"]: c for c in extract_failure_context(str(tmp_path), output)}
+
+
+def test_method_called_on_object_pulls_in_its_definition(tmp_path):
+    contexts = _method_repo(tmp_path, {"resp": "class Resp:\n    def follow(self, url):\n        return url\n"})
+
+    labels = [f["label"] for f in contexts["pkg/resp.py"]["focus"]]
+    assert labels == ["Method Resp.follow"]
+    assert "assertEqual" not in str(contexts.keys())
+
+
+def test_method_name_in_imported_module_beats_other_matches(tmp_path):
+    defs = {f"m{i}": f"class C{i}:\n    def follow(self):\n        pass\n" for i in range(5)}
+    contexts = _method_repo(tmp_path, defs, test_imports="from pkg.m2 import C2")
+
+    assert [f["label"] for f in contexts["pkg/m2.py"]["focus"]] == ["Method C2.follow"]
+    assert "pkg/m0.py" not in contexts
+
+
+def test_generic_method_defined_in_many_places_is_skipped(tmp_path):
+    defs = {f"m{i}": f"class C{i}:\n    def follow(self):\n        pass\n" for i in range(5)}
+    contexts = _method_repo(tmp_path, defs)
+
+    assert not any(path.startswith("pkg/") for path in contexts)
+
+
+def test_method_passed_as_reference_pulls_in_its_definition(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "resp.py").write_text("class Resp:\n    def follow(self, url):\n        return url\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_x():\n    r = make()\n    assertRaises(ValueError, r.follow, None)\n"
+    )
+    output = '  File "/app/tests/test_x.py", line 3, in test_x\n'
+
+    contexts = {c["path"]: c for c in extract_failure_context(str(tmp_path), output)}
+
+    assert [f["label"] for f in contexts["pkg/resp.py"]["focus"]] == ["Method Resp.follow"]

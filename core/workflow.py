@@ -5,6 +5,7 @@ from typing import Callable, TypedDict
 from langgraph.graph import END, StateGraph
 
 from .context_extractor import extract_failure_context
+from .library_context import library_contexts
 from .models import PatchPlan
 from .patch_applier import apply_patch
 from .patch_generator import generate_patch
@@ -99,6 +100,14 @@ def build_workflow(
             print(message)
             return {"contexts": [], "status": "no_context", "error": message}
         print(f"Found {len(contexts)} relevant file(s): {[item['path'] for item in contexts]}")
+        try:
+            libraries = library_contexts(runner, state["repo_path"], contexts)
+        except Exception as exc:
+            libraries = []
+            print(f"Skipping external library lookup: {exc}")
+        if libraries:
+            print(f"Added {len(libraries)} external library function(s): {[item['path'] for item in libraries]}")
+            contexts = contexts + libraries
         return {"contexts": contexts, "status": "context_found", "error": None}
 
     def route_after_context(state: WorkflowState) -> str:

@@ -223,10 +223,14 @@ class DockerTestRunner:
         """Run the test command inside a fresh container. Returns:
         {"success": bool, "output": str, "exit_code": int}
         """
+        return self.run_command(self.test_command)
+
+    def run_command(self, command: str) -> dict:
+        """Run any shell command in a fresh container (same result shape as run)."""
         try:
             container = self.client.containers.run(
                 self.image,
-                command=["sh", "-c", self.test_command],
+                command=["sh", "-c", command],
                 volumes={self.repo_path: {"bind": "/app", "mode": "rw"}},
                 working_dir="/app",
                 detach=True,
@@ -236,7 +240,7 @@ class DockerTestRunner:
         except ImageNotFound:
             print(f"[docker] Image {self.image} not found locally, pulling...")
             self.client.images.pull(self.image)
-            return self.run()
+            return self.run_command(command)
         except APIError as e:
             return {"success": False, "output": f"Docker API error: {e}", "exit_code": -1}
 
