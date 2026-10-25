@@ -7,6 +7,7 @@ from langgraph.graph import END, StateGraph
 from .context_extractor import extract_failure_context
 from .library_context import library_contexts
 from .models import PatchPlan
+from .observability import traced
 from .patch_applier import apply_patch
 from .patch_generator import generate_patch
 
@@ -27,6 +28,44 @@ class WorkflowState(TypedDict):
     apply_failures: int
     status: str
     error: str | None
+
+
+# Metadata-only summaries for tracing (no prompts, file contents or test output).
+def _summarize_tests(state, result):
+    return {
+        "status": result.get("status"),
+        "passed": result.get("tests_passed"),
+        "exit_code": result.get("exit_code"),
+        "fixes_used": state["fixes_used"],
+        "output_chars": len(result.get("test_output", "")),
+    }
+
+
+def _summarize_context(state, result):
+    paths = [c["path"] for c in result.get("contexts", [])]
+    return {
+        "status": result.get("status"),
+        "files": paths,
+        "library_functions": [p for p in paths if p.startswith("external library")],
+    }
+
+
+def _summarize_plan(state, result):
+    plan = result.get("patch_plan")
+    return {
+        "status": result.get("status"),
+        "root_cause": plan.root_cause if plan else None,
+        "edits": [{"file_path": p.file_path, "old": p.old, "new": p.new} for p in plan.patches] if plan else [],
+    }
+
+
+def _summarize_apply(state, result):
+    return {
+        "status": result.get("status"),
+        "apply_failures": result.get("apply_failures", state["apply_failures"]),
+        "fixes_used": result.get("fixes_used", state["fixes_used"]),
+        "failure_feedback": result.get("feedback", "")[-1000:] if result.get("status") != "patches_applied" else None,
+    }
 
 
 def build_workflow(
@@ -189,11 +228,11 @@ def build_workflow(
         return "run_tests" if state["status"] == "patches_applied" else "done"
 
     graph = StateGraph(WorkflowState)
-    graph.add_node("run_tests", run_tests)
+    graph.add_node("run_tests", traced("run-tests", _summarize_tests)(run_tests))
     graph.add_node("mark_exhausted", mark_exhausted)
-    graph.add_node("extract_context", extract_context)
-    graph.add_node("generate_plan", generate_plan)
-    graph.add_node("apply_plan", apply_plan)
+    graph.add_node("extract_context", traced("extract-context", _summarize_context)(extract_context))
+    graph.add_node("generate_plan", traced("generate-plan", _summarize_plan)(generate_plan))
+    graph.add_node("apply_plan", traced("apply-plan", _summarize_apply)(apply_plan))
 
     graph.set_entry_point("run_tests")
     graph.add_conditional_edges(

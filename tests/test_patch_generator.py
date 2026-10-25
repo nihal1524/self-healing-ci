@@ -28,7 +28,9 @@ def _fake_anthropic(monkeypatch, tool_inputs):
     def create(**kwargs):
         calls.append(kwargs)
         block = types.SimpleNamespace(type="tool_use", name="submit_patch_plan", input=tool_inputs[len(calls) - 1])
-        return types.SimpleNamespace(content=[block])
+        return types.SimpleNamespace(
+            content=[block], usage=types.SimpleNamespace(input_tokens=10, output_tokens=5), stop_reason="tool_use"
+        )
 
     client = types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
     monkeypatch.setattr(pg.anthropic, "Anthropic", lambda api_key: client)

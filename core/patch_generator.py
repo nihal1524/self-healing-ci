@@ -12,6 +12,7 @@ import os
 import anthropic
 
 from .models import PatchPlan
+from .observability import observe
 
 MAX_TOOL_ATTEMPTS = 3
 
@@ -72,18 +73,31 @@ def generate_patch(
 
     problem = ""
     for attempt in range(1, MAX_TOOL_ATTEMPTS + 1):
-        message = client.messages.create(
+        # Metadata only: the (large) prompt is not recorded, the model's edits are.
+        with observe(
+            "patch-generation",
+            as_type="generation",
             model=model,
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            tools=[tool],
-            tool_choice={"type": "auto"},
-            messages=[{"role": "user", "content": prompt + problem}],
-        )
-        call = next(
-            (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
-            None,
-        )
+            metadata={"attempt": attempt, "prompt_chars": len(prompt + problem), "context_files": len(file_contexts)},
+        ) as generation:
+            message = client.messages.create(
+                model=model,
+                max_tokens=4000,
+                system=SYSTEM_PROMPT,
+                tools=[tool],
+                tool_choice={"type": "auto"},
+                messages=[{"role": "user", "content": prompt + problem}],
+            )
+            call = next(
+                (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
+                None,
+            )
+            usage = getattr(message, "usage", None)
+            generation.update(
+                output=call.input if call else None,
+                usage_details={"input": usage.input_tokens, "output": usage.output_tokens} if usage else None,
+                metadata={"stop_reason": getattr(message, "stop_reason", None), "valid_tool_call": call is not None},
+            )
         try:
             if call is None:
                 raise ValueError("no submit_patch_plan tool call was returned")
