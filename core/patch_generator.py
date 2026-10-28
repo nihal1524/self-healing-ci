@@ -11,17 +11,20 @@ if it is missing), so we never regex-parse free text.
 import os
 import anthropic
 
+from .context_slice import FULL_FILE_MAX_LINES, reduce_file
 from .models import PatchPlan
 from .observability import observe
 
 MAX_TOOL_ATTEMPTS = 3
+MAX_OUTPUT_TOKENS = 16000  # 4000 was exhausted by reasoning text before the tool call (stop_reason=max_tokens)
+MAX_CONTEXT_CHARS = 400_000  # ~100k tokens; files without focus snippets are dropped first
 
 SYSTEM_PROMPT = """You are an expert software engineer operating inside an \
 automated self-healing CI pipeline. You will be given the output of a \
 failing test run and the current contents of the source file(s) involved.
 
 Diagnose the root cause and produce the SMALLEST correct fix. Respond only \
-by calling the submit_patch_plan tool. Each patch is a search/replace edit:
+by calling the submit_patch_plan tool, with no text before the call. Each patch is a search/replace edit:
   - file_path is the exact relative path given in the context
   - old is text copied verbatim from that file (same indentation), and must \
 appear exactly once. Use the SMALLEST snippet that is unique -- ideally a \
@@ -41,7 +44,27 @@ def format_context(c: dict) -> str:
         f"[Most relevant: {f['label']}, lines {f['start']}-{f['end']}]\n{f['source']}\n\n"
         for f in c.get("focus", [])
     )
-    return f"--- FILE: {c['path']} ---\n{focus}[Full file]\n{c['content']}"
+    if c["path"].endswith(".py") and c["content"].count("\n") + 1 > FULL_FILE_MAX_LINES:
+        body = (
+            "[Reduced view of a large file: unrelated code is replaced by '# ... [N lines omitted]'; "
+            "the shown lines are verbatim]\n" + reduce_file(c["content"], c.get("focus", []))
+        )
+    else:
+        body = f"[Full file]\n{c['content']}"
+    return f"--- FILE: {c['path']} ---\n{focus}{body}"
+
+
+def fit_budget(file_contexts: list[dict]) -> list[tuple[dict, str]]:
+    """Format every file; if the prompt is too big, drop the largest files that have no focus snippets."""
+    blocks = [(c, format_context(c)) for c in file_contexts]
+    while sum(len(text) for _, text in blocks) > MAX_CONTEXT_CHARS:
+        droppable = [b for b in blocks if not b[0].get("focus")]
+        if not droppable:
+            break
+        largest = max(droppable, key=lambda b: len(b[1]))
+        print(f"    Dropping {largest[0]['path']} from the prompt (context over budget)")
+        blocks.remove(largest)
+    return blocks
 
 
 def generate_patch(
@@ -56,7 +79,8 @@ def generate_patch(
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    context_text = "\n\n".join(format_context(c) for c in file_contexts)
+    blocks = fit_budget(file_contexts)
+    context_text = "\n\n".join(text for _, text in blocks)
 
     tool = {
         "name": "submit_patch_plan",
@@ -78,11 +102,11 @@ def generate_patch(
             "patch-generation",
             as_type="generation",
             model=model,
-            metadata={"attempt": attempt, "prompt_chars": len(prompt + problem), "context_files": len(file_contexts)},
+            metadata={"attempt": attempt, "prompt_chars": len(prompt + problem), "context_files": len(blocks), "context_chars": len(context_text)},
         ) as generation:
             message = client.messages.create(
                 model=model,
-                max_tokens=4000,
+                max_tokens=MAX_OUTPUT_TOKENS,
                 system=SYSTEM_PROMPT,
                 tools=[tool],
                 tool_choice={"type": "auto"},
