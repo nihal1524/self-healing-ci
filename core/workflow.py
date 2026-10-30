@@ -30,6 +30,8 @@ class WorkflowState(TypedDict):
     error: str | None
 
 
+MAX_APPLY_FAILURES = 2  # edits that fail to apply are retried with feedback this many times per run
+
 # Metadata-only summaries for tracing (no prompts, file contents or test output).
 def _summarize_tests(state, result):
     return {
@@ -208,7 +210,7 @@ def build_workflow(
                 f"- Edit to {patch.file_path} could not be applied: {error}\n"
                 f"  old snippet was:\n{patch.old}\n"
             )
-            if failures >= state["max_attempts"]:
+            if failures >= MAX_APPLY_FAILURES:
                 message = "Patch failed to apply and no attempts are left. Stopping."
                 print(f"\n{message}")
                 return {"status": "patch_error", "error": message, "apply_failures": failures}

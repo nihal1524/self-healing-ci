@@ -95,4 +95,6 @@ def test_generation_records_usage_and_edits_but_not_the_prompt(monkeypatch):
     assert name == "patch-generation" and kwargs["as_type"] == "generation" and kwargs["model"] == "m"
     assert "input" not in kwargs and "SECRET" not in str(client.log)
     assert updates[0]["output"]["patches"][0]["old"] == "x = 1"
-    assert updates[0]["usage_details"] == {"input": 10, "output": 5}
+    assert updates[0]["usage_details"] == {
+        "input": 10, "output": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+    }

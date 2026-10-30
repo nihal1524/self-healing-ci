@@ -52,7 +52,7 @@ def test_invalid_tool_input_is_retried_with_the_error(monkeypatch):
 
     assert plan.patches[0].new == "x = 2"
     assert len(calls) == 2
-    assert "previous response was invalid" in calls[1]["messages"][0]["content"]
+    assert "previous response was invalid" in calls[1]["messages"][0]["content"][1]["text"]
 
 
 def test_gives_up_after_repeated_invalid_tool_input(monkeypatch):
@@ -64,3 +64,17 @@ def test_gives_up_after_repeated_invalid_tool_input(monkeypatch):
     with pytest.raises(RuntimeError, match="3 tries"):
         pg.generate_patch("out", [{"path": "a.py", "content": "x = 1"}])
     assert len(calls) == 3
+
+
+def test_large_context_is_the_cacheable_prefix_and_retries_keep_it_identical(monkeypatch):
+    bad = {"root_cause": "bug", "patches": "oops"}
+    pg, calls = _fake_anthropic(monkeypatch, [bad, GOOD])
+
+    pg.generate_patch("TEST OUTPUT", [{"path": "a.py", "content": "x = 1"}], feedback="tried A")
+
+    first, retry = (c["messages"][0]["content"] for c in calls)
+    assert first[0]["cache_control"] == {"type": "ephemeral"}
+    assert "Relevant source files" in first[0]["text"] and "TEST OUTPUT" not in first[0]["text"]
+    assert "cache_control" not in first[1] and "TEST OUTPUT" in first[1]["text"] and "tried A" in first[1]["text"]
+    assert retry[0] == first[0]  # byte-identical prefix -> the retry reads it from cache
+    assert "previous response was invalid" in retry[1]["text"]

@@ -54,6 +54,18 @@ def format_context(c: dict) -> str:
     return f"--- FILE: {c['path']} ---\n{focus}{body}"
 
 
+def _usage_details(usage) -> dict | None:
+    """Token usage incl. prompt-cache activity (input_tokens counts only the uncached remainder)."""
+    if usage is None:
+        return None
+    return {
+        "input": usage.input_tokens,
+        "output": usage.output_tokens,
+        "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+    }
+
+
 def fit_budget(file_contexts: list[dict]) -> list[tuple[dict, str]]:
     """Format every file; if the prompt is too big, drop the largest files that have no focus snippets."""
     blocks = [(c, format_context(c)) for c in file_contexts]
@@ -88,9 +100,12 @@ def generate_patch(
         "input_schema": PatchPlan.model_json_schema(),
     }
 
-    prompt = (
+    # Prompt caching: the large file context goes FIRST and carries the cache breakpoint, so retries
+    # and later attempts re-read it at ~0.1x. Everything that varies per call (test output, feedback,
+    # retry notes) comes after the breakpoint -- caching is a prefix match.
+    shared = f"Relevant source files:\n{context_text}"
+    variable = (
         f"Failing test output:\n```\n{test_output[-6000:]}\n```\n\n"
-        f"Relevant source files:\n{context_text}\n\n"
         + (f"Earlier attempts that did not fix it:\n{feedback}\n\n" if feedback else "")
         + "Diagnose and produce a patch."
     )
@@ -102,7 +117,7 @@ def generate_patch(
             "patch-generation",
             as_type="generation",
             model=model,
-            metadata={"attempt": attempt, "prompt_chars": len(prompt + problem), "context_files": len(blocks), "context_chars": len(context_text)},
+            metadata={"attempt": attempt, "prompt_chars": len(shared) + len(variable + problem), "context_files": len(blocks), "context_chars": len(context_text)},
         ) as generation:
             message = client.messages.create(
                 model=model,
@@ -110,7 +125,13 @@ def generate_patch(
                 system=SYSTEM_PROMPT,
                 tools=[tool],
                 tool_choice={"type": "auto"},
-                messages=[{"role": "user", "content": prompt + problem}],
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": shared, "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": variable + problem},
+                    ],
+                }],
             )
             call = next(
                 (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
@@ -119,7 +140,7 @@ def generate_patch(
             usage = getattr(message, "usage", None)
             generation.update(
                 output=call.input if call else None,
-                usage_details={"input": usage.input_tokens, "output": usage.output_tokens} if usage else None,
+                usage_details=_usage_details(usage),
                 metadata={"stop_reason": getattr(message, "stop_reason", None), "valid_tool_call": call is not None},
             )
         try:
