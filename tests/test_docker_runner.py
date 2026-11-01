@@ -51,7 +51,7 @@ def test_setup_command_builds_environment_image_without_copying_repo(tmp_path, m
     build_args, dockerfile = images.build_calls[0]
     assert build_args["tag"] == runner.image
     assert dockerfile == (
-        "FROM python:3.8-slim\nRUN pip install pytest numpy\n"
+        "FROM python:3.8-slim\nENV PIP_TIMEOUT=120 PIP_RETRIES=8\nRUN pip install pytest numpy\n"
     )
     assert "COPY" not in dockerfile
     assert runner.test_command == "pytest -q"
@@ -102,7 +102,8 @@ def test_requirements_are_baked_and_local_project_is_installed_at_runtime(
     _, dockerfile = images.build_calls[0]
     assert "COPY requirements.txt /tmp/requirements.txt" in dockerfile
     assert "pip install --no-cache-dir -r /tmp/requirements.txt" in dockerfile
-    assert "pip install --no-cache-dir pytest ruff" in dockerfile
+    assert "pip install --no-cache-dir pytest " in dockerfile
+    assert "(pip install --no-cache-dir ruff || true)" in dockerfile
     assert images.context_files[0]["requirements.txt"] == "numpy==1.26.4\n"
     assert runner.test_command.startswith("pip install -e . && ")
     assert "pip install -r requirements.txt" not in runner.test_command

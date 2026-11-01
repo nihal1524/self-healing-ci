@@ -21,6 +21,9 @@ import docker
 from docker.errors import ImageNotFound, APIError
 
 
+# Patient pip for flaky networks (default is a 15s timeout / 5 retries); inherited by derived images.
+PIP_ENV = "ENV PIP_TIMEOUT=120 PIP_RETRIES=8\n"
+
 class DockerTestRunner:
     def __init__(
         self,
@@ -148,9 +151,11 @@ class DockerTestRunner:
             with open(dockerfile, "w", encoding="utf-8") as file:
                 file.write(
                     f"FROM {self.base_image}\n"
+                    f"{PIP_ENV}"
                     f"{copies}"
                     "RUN pip install --no-cache-dir -r /tmp/requirements.txt "
-                    "&& pip install --no-cache-dir pytest ruff\n"
+                    "&& pip install --no-cache-dir pytest "
+                    "&& (pip install --no-cache-dir ruff || true)\n"  # ruff has no release for old Pythons (e.g. 3.6)
                 )
             _, build_logs = self.client.images.build(
                 path=context,
@@ -183,7 +188,7 @@ class DockerTestRunner:
         with tempfile.TemporaryDirectory(prefix="self-heal-image-") as context:
             dockerfile = os.path.join(context, "Dockerfile")
             with open(dockerfile, "w") as file:
-                file.write(f"FROM {base_image}\nRUN {setup_command}\n")
+                file.write(f"FROM {base_image}\n{PIP_ENV}RUN {setup_command}\n")
             _, build_logs = self.client.images.build(
                 path=context,
                 dockerfile="Dockerfile",

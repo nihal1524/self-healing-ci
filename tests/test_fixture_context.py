@@ -164,3 +164,41 @@ def test_method_passed_as_reference_pulls_in_its_definition(tmp_path):
     contexts = {c["path"]: c for c in extract_failure_context(str(tmp_path), output)}
 
     assert [f["label"] for f in contexts["pkg/resp.py"]["focus"]] == ["Method Resp.follow"]
+
+
+def test_package_under_lib_is_found_from_test_imports(tmp_path):
+    (tmp_path / "lib" / "pkg").mkdir(parents=True)
+    (tmp_path / "lib" / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "lib" / "pkg" / "version.py").write_text(
+        "class Alpha:\n    def __gt__(self, other):\n        return True\n"
+    )
+    (tmp_path / "test" / "units").mkdir(parents=True)
+    (tmp_path / "test" / "units" / "test_version.py").write_text(
+        "from pkg.version import Alpha\n\ndef test_alpha():\n    assert not Alpha() > Alpha()\n"
+    )
+    output = '  File "/app/test/units/test_version.py", line 4, in test_alpha\n    assert not Alpha() > Alpha()\n'
+
+    contexts = {c["path"]: c for c in extract_failure_context(str(tmp_path), output)}
+
+    assert "lib/pkg/version.py" in contexts
+    assert any("Alpha" in f["label"] or "Alpha" in f["source"] for f in contexts["lib/pkg/version.py"]["focus"]) or "lib/pkg/__init__.py" in contexts
+
+
+def test_submodule_import_pulls_in_the_module_and_wins_the_method_tiebreak(tmp_path):
+    hw = tmp_path / "lib" / "pkg" / "hw"
+    hw.mkdir(parents=True)
+    (tmp_path / "lib" / "pkg" / "__init__.py").write_text("")
+    (hw / "__init__.py").write_text("")
+    for name in ("linux", "darwin", "freebsd", "sunos", "aix"):  # 5 classes define the same method
+        (hw / f"{name}.py").write_text(f"class {name.title()}:\n    def get_cpu_facts(self):\n        return {{}}\n")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "test_hw.py").write_text(
+        "from pkg.hw import linux\n\ndef test_cpu():\n    assert linux.Linux().get_cpu_facts() == {'x': 1}\n"
+    )
+    output = '  File "/app/test/test_hw.py", line 4, in test_cpu\n'
+
+    contexts = {c["path"]: c for c in extract_failure_context(str(tmp_path), output)}
+
+    assert "lib/pkg/hw/linux.py" in contexts
+    assert "Method Linux.get_cpu_facts" in [f["label"] for f in contexts["lib/pkg/hw/linux.py"]["focus"]]
+    assert "lib/pkg/hw/darwin.py" not in contexts

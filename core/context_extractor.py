@@ -35,6 +35,9 @@ JS_STACK_RE = re.compile(r"\(?(/app/[^\s:()]+\.[jt]sx?):(\d+):(\d+)\)?")
 # pytest location lines: "tax.py:6: ZeroDivisionError" / "/app/tests/test_x.py:5: in test_x"
 FILE_LINE_RE = re.compile(r"(?P<path>(?:/app/)?[A-Za-z0-9_./\\-]+\.py):(?P<line>\d+)")
 
+# Directories (relative to the repo) where importable packages may live, e.g. ansible keeps its code in lib/.
+SOURCE_ROOTS = ("", "lib", "src")
+
 # AST nodes that can enclose a failure line
 CALLABLES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
@@ -122,6 +125,13 @@ def find_failing_files(test_output: str) -> set[str]:
 # from foo import bar / from foo.bar import baz / import foo
 PY_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z_][\w\.]*)", re.MULTILINE)
 
+# "from pkg import a, b as c" -- each name may be a submodule (pkg/a.py), not just a symbol.
+FROM_IMPORT_RE = re.compile(r"^\s*from\s+([a-zA-Z_][\w\.]*)\s+import\s+\(?([^\n#]+)", re.MULTILINE)
+
+
+def _imported_names(names: str) -> list[str]:
+    return [n.split(" as ")[0].strip(" ()\t\\") for n in names.split(",") if n.split(" as ")[0].strip(" ()\t\\").isidentifier()]
+
 
 def _local_imports(file_content: str, repo_path: str) -> set[str]:
     """Resolve absolute Python imports to matching local modules/packages.
@@ -144,20 +154,25 @@ def _local_imports(file_content: str, repo_path: str) -> set[str]:
             relative = os.path.relpath(candidate, repo_path)
             found.add(relative.replace(os.sep, "/"))
 
-    for m in PY_IMPORT_RE.finditer(file_content):
-        components = m.group(1).split(".")
-        module_path = os.path.join(repo_path, *components)
+    modules = [m.group(1) for m in PY_IMPORT_RE.finditer(file_content)]
+    for m in FROM_IMPORT_RE.finditer(file_content):
+        modules += [f"{m.group(1)}.{name}" for name in _imported_names(m.group(2))]  # submodule imports
 
-        # Candidate 1: a dotted import may resolve to a module file.
-        add_if_local(f"{module_path}.py")
+    for dotted in modules:
+        components = dotted.split(".")
+        for root in SOURCE_ROOTS:
+            base = os.path.join(repo_path, root)
+            module_path = os.path.join(base, *components)
 
-        # Candidate 2: or to a package whose implementation is __init__.py.
-        add_if_local(os.path.join(module_path, "__init__.py"))
+            # Candidate 1: a dotted import may resolve to a module file.
+            add_if_local(f"{module_path}.py")
 
-        # Include parent package initializers that may re-export the import.
-        for index in range(1, len(components)):
-            package_path = os.path.join(repo_path, *components[:index], "__init__.py")
-            add_if_local(package_path)
+            # Candidate 2: or to a package whose implementation is __init__.py.
+            add_if_local(os.path.join(module_path, "__init__.py"))
+
+            # Include parent package initializers that may re-export the import.
+            for index in range(1, len(components)):
+                add_if_local(os.path.join(base, *components[:index], "__init__.py"))
     return found
 
 
@@ -259,18 +274,17 @@ def _node_snippet(label: str, source: str, node: ast.AST) -> dict:
 
 
 def _resolve_module(repo: Path, module: str) -> Path | None:
-    """Resolve a dotted import to a local module or package __init__.py."""
+    """Resolve a dotted import to a local module or package __init__.py (also under lib/ or src/)."""
     parts = module.split(".")
-    module_file = repo.joinpath(*parts).with_suffix(".py")
-    package_file = repo.joinpath(*parts, "__init__.py")
-
-    for candidate in (module_file, package_file):
-        if candidate.is_file():
-            try:
-                candidate.resolve().relative_to(repo.resolve())
-            except ValueError:
-                continue
-            return candidate.resolve()
+    for root in SOURCE_ROOTS:
+        base = repo / root
+        for candidate in (base.joinpath(*parts).with_suffix(".py"), base.joinpath(*parts, "__init__.py")):
+            if candidate.is_file():
+                try:
+                    candidate.resolve().relative_to(repo.resolve())
+                except ValueError:
+                    continue
+                return candidate.resolve()
     return None
 
 
@@ -317,7 +331,9 @@ def _method_definitions(repo: Path, test_tree: ast.Module, test_function: ast.AS
         module_path
         for node in ast.walk(test_tree)
         if isinstance(node, ast.ImportFrom) and node.module and not node.level
-        for module_path in [_resolve_module(repo, node.module)]
+        # the package itself, plus any imported name that is really a submodule (from pkg import mod)
+        for dotted in [node.module] + [f"{node.module}.{alias.name}" for alias in node.names]
+        for module_path in [_resolve_module(repo, dotted)]
         if module_path
     }
     found: dict[str, list[tuple]] = {name: [] for name in names}
