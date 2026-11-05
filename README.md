@@ -217,6 +217,18 @@ automatically roll back already-applied changes.
   verify the last patch. Missing context or failed patch application stops the
   graph without continuing to another test run.
 
+## Observability (Langfuse, optional)
+
+Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` (see
+`.env.example`) to trace each run; without them tracing is a silent no-op. Only
+metadata is sent: statuses, exit codes, file paths, token usage and the model's
+`old`/`new` edits. Prompts, file contents and test output are never recorded.
+
+Each `heal.py` run is one trace (`self-heal`) with spans `run-tests`,
+`extract-context`, `generate-plan`, `apply-plan` and one `patch-generation`
+generation per model call. Add `--trace-tag <name>` (repeatable) to label a run,
+for example with a BugsInPy bug id.
+
 ## Review changes carefully
 
 The target repository is mounted read-write. LLM patch application can modify

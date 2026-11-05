@@ -11,16 +11,20 @@ if it is missing), so we never regex-parse free text.
 import os
 import anthropic
 
+from .context_slice import FULL_FILE_MAX_LINES, reduce_file
 from .models import PatchPlan
+from .observability import observe
 
 MAX_TOOL_ATTEMPTS = 3
+MAX_OUTPUT_TOKENS = 16000  # 4000 was exhausted by reasoning text before the tool call (stop_reason=max_tokens)
+MAX_CONTEXT_CHARS = 400_000  # ~100k tokens; files without focus snippets are dropped first
 
 SYSTEM_PROMPT = """You are an expert software engineer operating inside an \
 automated self-healing CI pipeline. You will be given the output of a \
 failing test run and the current contents of the source file(s) involved.
 
 Diagnose the root cause and produce the SMALLEST correct fix. Respond only \
-by calling the submit_patch_plan tool. Each patch is a search/replace edit:
+by calling the submit_patch_plan tool, with no text before the call. Each patch is a search/replace edit:
   - file_path is the exact relative path given in the context
   - old is text copied verbatim from that file (same indentation), and must \
 appear exactly once. Use the SMALLEST snippet that is unique -- ideally a \
@@ -40,7 +44,39 @@ def format_context(c: dict) -> str:
         f"[Most relevant: {f['label']}, lines {f['start']}-{f['end']}]\n{f['source']}\n\n"
         for f in c.get("focus", [])
     )
-    return f"--- FILE: {c['path']} ---\n{focus}[Full file]\n{c['content']}"
+    if c["path"].endswith(".py") and c["content"].count("\n") + 1 > FULL_FILE_MAX_LINES:
+        body = (
+            "[Reduced view of a large file: unrelated code is replaced by '# ... [N lines omitted]'; "
+            "the shown lines are verbatim]\n" + reduce_file(c["content"], c.get("focus", []))
+        )
+    else:
+        body = f"[Full file]\n{c['content']}"
+    return f"--- FILE: {c['path']} ---\n{focus}{body}"
+
+
+def _usage_details(usage) -> dict | None:
+    """Token usage incl. prompt-cache activity (input_tokens counts only the uncached remainder)."""
+    if usage is None:
+        return None
+    return {
+        "input": usage.input_tokens,
+        "output": usage.output_tokens,
+        "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+    }
+
+
+def fit_budget(file_contexts: list[dict]) -> list[tuple[dict, str]]:
+    """Format every file; if the prompt is too big, drop the largest files that have no focus snippets."""
+    blocks = [(c, format_context(c)) for c in file_contexts]
+    while sum(len(text) for _, text in blocks) > MAX_CONTEXT_CHARS:
+        droppable = [b for b in blocks if not b[0].get("focus")]
+        if not droppable:
+            break
+        largest = max(droppable, key=lambda b: len(b[1]))
+        print(f"    Dropping {largest[0]['path']} from the prompt (context over budget)")
+        blocks.remove(largest)
+    return blocks
 
 
 def generate_patch(
@@ -55,7 +91,8 @@ def generate_patch(
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    context_text = "\n\n".join(format_context(c) for c in file_contexts)
+    blocks = fit_budget(file_contexts)
+    context_text = "\n\n".join(text for _, text in blocks)
 
     tool = {
         "name": "submit_patch_plan",
@@ -63,27 +100,49 @@ def generate_patch(
         "input_schema": PatchPlan.model_json_schema(),
     }
 
-    prompt = (
+    # Prompt caching: the large file context goes FIRST and carries the cache breakpoint, so retries
+    # and later attempts re-read it at ~0.1x. Everything that varies per call (test output, feedback,
+    # retry notes) comes after the breakpoint -- caching is a prefix match.
+    shared = f"Relevant source files:\n{context_text}"
+    variable = (
         f"Failing test output:\n```\n{test_output[-6000:]}\n```\n\n"
-        f"Relevant source files:\n{context_text}\n\n"
         + (f"Earlier attempts that did not fix it:\n{feedback}\n\n" if feedback else "")
         + "Diagnose and produce a patch."
     )
 
     problem = ""
     for attempt in range(1, MAX_TOOL_ATTEMPTS + 1):
-        message = client.messages.create(
+        # Metadata only: the (large) prompt is not recorded, the model's edits are.
+        with observe(
+            "patch-generation",
+            as_type="generation",
             model=model,
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            tools=[tool],
-            tool_choice={"type": "auto"},
-            messages=[{"role": "user", "content": prompt + problem}],
-        )
-        call = next(
-            (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
-            None,
-        )
+            metadata={"attempt": attempt, "prompt_chars": len(shared) + len(variable + problem), "context_files": len(blocks), "context_chars": len(context_text)},
+        ) as generation:
+            message = client.messages.create(
+                model=model,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                system=SYSTEM_PROMPT,
+                tools=[tool],
+                tool_choice={"type": "auto"},
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": shared, "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": variable + problem},
+                    ],
+                }],
+            )
+            call = next(
+                (b for b in message.content if b.type == "tool_use" and b.name == "submit_patch_plan"),
+                None,
+            )
+            usage = getattr(message, "usage", None)
+            generation.update(
+                output=call.input if call else None,
+                usage_details=_usage_details(usage),
+                metadata={"stop_reason": getattr(message, "stop_reason", None), "valid_tool_call": call is not None},
+            )
         try:
             if call is None:
                 raise ValueError("no submit_patch_plan tool call was returned")

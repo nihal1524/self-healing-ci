@@ -25,6 +25,7 @@ import argparse
 import os
 import sys
 
+from core import observability
 from core.docker_runner import DockerTestRunner
 from core.workflow import run_workflow
 
@@ -54,6 +55,12 @@ def main():
     )
     parser.add_argument(
         "--model", default="claude-sonnet-5-5", help="Anthropic model to use for patch generation"
+    )
+    parser.add_argument(
+        "--trace-tag",
+        action="append",
+        default=[],
+        help="Langfuse tag for this run (repeatable), e.g. the BugsInPy bug id",
     )
     args = parser.parse_args()
 
@@ -88,15 +95,26 @@ def main():
     print("Workflow: LangGraph")
 
     try:
-        final_state = run_workflow(
-            runner=runner,
-            repo_path=repo_path,
-            max_attempts=args.max_attempts,
-            model=args.model,
-        )
+        with observability.run_trace(
+            "self-heal",
+            tags=args.trace_tag,
+            metadata={"repo": os.path.basename(repo_path), "model": args.model, "max_attempts": args.max_attempts},
+        ) as run:
+            final_state = run_workflow(
+                runner=runner,
+                repo_path=repo_path,
+                max_attempts=args.max_attempts,
+                model=args.model,
+            )
+            run.update(
+                output={key: final_state.get(key) for key in ("status", "fixes_used", "apply_failures", "error")},
+                level="DEFAULT" if final_state["status"] in ("success", "already_passing") else "ERROR",
+            )
     except Exception as e:
         print(f"Workflow failed unexpectedly: {e}")
         sys.exit(1)
+    finally:
+        observability.flush()
 
     if final_state["status"] not in ("success", "already_passing"):
         if final_state.get("error"):
