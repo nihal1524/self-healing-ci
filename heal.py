@@ -26,6 +26,7 @@ import os
 import sys
 
 from core import observability
+from core.result import build_result, write_result
 from core.docker_runner import DockerTestRunner
 from core.workflow import run_workflow
 
@@ -61,6 +62,11 @@ def main():
         action="append",
         default=[],
         help="Langfuse tag for this run (repeatable), e.g. the BugsInPy bug id",
+    )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help="Write a JSON summary of the run here (used by the GitHub Action)",
     )
     args = parser.parse_args()
 
@@ -112,9 +118,14 @@ def main():
             )
     except Exception as e:
         print(f"Workflow failed unexpectedly: {e}")
+        if args.result_file:
+            write_result(args.result_file, {"status": "crashed", "error": str(e), "model": args.model})
         sys.exit(1)
     finally:
         observability.flush()
+
+    if args.result_file:
+        write_result(args.result_file, build_result(final_state, args.model))
 
     if final_state["status"] not in ("success", "already_passing"):
         if final_state.get("error"):

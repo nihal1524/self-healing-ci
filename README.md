@@ -229,6 +229,20 @@ Each `heal.py` run is one trace (`self-heal`) with spans `run-tests`,
 generation per model call. Add `--trace-tag <name>` (repeatable) to label a run,
 for example with a BugsInPy bug id.
 
+## GitHub Action (open a PR when CI fails)
+
+`action.yml` at the repo root is a composite action. In the repository you want healed, copy
+`examples/self-heal.yml` to `.github/workflows/self-heal.yml` and set `test-cmd` (and `setup-cmd`,
+`image`). When the tests fail, the action runs `heal.py` on the runner, and if a fix is found it
+pushes `self-healing/<branch>` and opens (or updates) a pull request into `<branch>`.
+
+- Run it by hand first (`workflow_dispatch`), then enable the `workflow_run` trigger.
+- Loop guard: it never runs for a branch that starts with `self-healing/`.
+- Secrets: pass `ANTHROPIC_API_KEY` (and optionally the Langfuse keys) from repository secrets.
+- Repo setting: "Allow GitHub Actions to create and approve pull requests" must be on.
+- `heal.py --result-file result.json` writes a JSON summary (status, attempts, root cause) that the
+  action uses for the PR body.
+
 ## Review changes carefully
 
 The target repository is mounted read-write. LLM patch application can modify
