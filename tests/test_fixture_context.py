@@ -2,11 +2,13 @@ from pathlib import Path
 
 from core.context_extractor import extract_failure_context
 from core.docker_runner import DockerTestRunner
+from tests.sample_repos import requires_sample
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@requires_sample("sample-direct-multifile")
 def test_imported_implementation_is_included_without_traceback_frame():
     repo = PROJECT_ROOT / "sample-direct-multifile"
     output = """
@@ -22,6 +24,7 @@ FAILED tests/test_calculator.py::test_multiply_returns_product - assert 13 == 42
     assert "calculator.py" in paths
 
 
+@requires_sample("sample-collection-error")
 def test_collection_traceback_finds_broken_importing_module():
     repo = PROJECT_ROOT / "sample-collection-error"
     output = """
@@ -41,6 +44,7 @@ ImportError: cannot import name 'ROUND_HALF_UPP' from 'decimal'
     assert "money.py" in paths
 
 
+@requires_sample("sample-direct-multifile")
 def test_junit_xml_report_is_used_as_a_hybrid_input():
     repo = PROJECT_ROOT / "sample-direct-multifile"
     xml = '''<?xml version="1.0" encoding="utf-8"?>
@@ -55,6 +59,7 @@ NameError: ROUND_HALF_UP is not defined</failure></testcase></testsuite></testsu
     assert "tax.py" in paths
 
 
+@requires_sample("sample-direct-multifile")
 def test_docker_runner_generates_junit_xml_report():
     runner = DockerTestRunner(str(PROJECT_ROOT / "sample-direct-multifile"))
     assert "--junitxml=/app/report.xml" in runner.test_command
