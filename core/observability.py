@@ -20,6 +20,8 @@ DEFAULT_HOST = "https://cloud.langfuse.com"
 
 _warned: set[str] = set()
 _trace_url: str | None = None
+_initialized = False
+ANTHROPIC_SDK_SCOPE = "com.anthropic."  # newer anthropic SDKs trace every request on their own
 
 
 def _warn(message: str) -> None:
@@ -29,12 +31,31 @@ def _warn(message: str) -> None:
         print(f"[langfuse] warning: {message}", flush=True)
 
 
+def _export_filter(span) -> bool:
+    """Langfuse's default export rule, minus the Anthropic SDK's own spans.
+
+    patch_generator already records each model call (with cache usage and the model's edit) as
+    "patch-generation"; exporting the SDK's span too would show one request as two generations and
+    double-count its tokens and cost in the trace totals.
+    """
+    from langfuse import is_default_export_span
+
+    scope = getattr(span, "instrumentation_scope", None)
+    if scope is not None and (scope.name or "").startswith(ANTHROPIC_SDK_SCOPE):
+        return False
+    return is_default_export_span(span)
+
+
 def _client():
+    global _initialized
     if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
         return None
     try:
-        from langfuse import get_client
+        from langfuse import Langfuse, get_client
 
+        if not _initialized:
+            Langfuse(should_export_span=_export_filter)  # reads the LANGFUSE_* env vars; get_client() returns it
+            _initialized = True
         return get_client()
     except Exception as exc:
         _warn(f"could not create the client: {exc}")

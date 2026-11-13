@@ -147,3 +147,17 @@ def test_swallowed_errors_are_printed_once(monkeypatch, capsys):
             pass
 
     assert capsys.readouterr().out.count("[langfuse] warning: could not start a span: langfuse down") == 1
+
+
+def _span(scope_name, **attributes):
+    return types.SimpleNamespace(instrumentation_scope=types.SimpleNamespace(name=scope_name), attributes=attributes)
+
+
+def test_export_filter_drops_the_anthropic_sdks_own_spans_but_keeps_ours():
+    assert ob._export_filter(_span("com.anthropic.sdk.python")) is False
+    assert ob._export_filter(_span("langfuse-sdk")) is True          # our generations and spans
+
+
+def test_export_filter_still_applies_langfuses_default_rule_to_everything_else():
+    assert ob._export_filter(_span("some.random.library")) is False  # not a langfuse/genai/known-LLM span
+    assert ob._export_filter(_span("some.random.library", **{"gen_ai.system": "x"})) is True
