@@ -98,3 +98,52 @@ def test_generation_records_usage_and_edits_but_not_the_prompt(monkeypatch):
     assert updates[0]["usage_details"] == {
         "input": 10, "output": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
     }
+
+
+def test_startup_report_names_exactly_what_is_missing(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-abcdefgh")
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    assert ob.startup_report() == "[langfuse] DISABLED - not set or empty: LANGFUSE_SECRET_KEY"
+
+
+def test_startup_report_flags_failed_auth_and_default_region(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-abcdefgh")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-secret")
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+
+    class BadAuth:
+        def auth_check(self):
+            raise RuntimeError("no projects found")
+
+    monkeypatch.setattr(ob, "_client", lambda: BadAuth())
+    report = ob.startup_report()
+
+    assert "auth check FAILED: no projects found" in report
+    assert "SDK default - set LANGFUSE_BASE_URL" in report
+    assert "sk-lf-secret" not in report  # the secret is never printed
+
+
+def test_startup_report_ok(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-abcdefgh")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-secret")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://jp.cloud.langfuse.com")
+    monkeypatch.setattr(ob, "_client", lambda: types.SimpleNamespace(auth_check=lambda: True))
+
+    assert ob.startup_report().endswith("host=https://jp.cloud.langfuse.com | public key pk-lf-abcd... | auth check: ok")
+
+
+def test_swallowed_errors_are_printed_once(monkeypatch, capsys):
+    class Broken:
+        def start_as_current_observation(self, **_):
+            raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr(ob, "_client", lambda: Broken())
+    ob._warned.clear()
+
+    for _ in range(3):
+        with ob.observe("step"):
+            pass
+
+    assert capsys.readouterr().out.count("[langfuse] warning: could not start a span: langfuse down") == 1

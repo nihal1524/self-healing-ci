@@ -150,7 +150,7 @@ runs:
           echo "- Status: \`${STATUS:-unknown}\`"
           if [ -n "${PR_URL:-}" ]; then echo "- Pull request: ${PR_URL}"; fi
           if [ -n "${RESULT_FILE:-}" ] && [ -f "$RESULT_FILE" ]; then
-            python -c "import json,sys; r=json.load(open(sys.argv[1])); print('- Root cause:', r.get('root_cause') or 'n/a'); print('- Fix attempts used:', r.get('fixes_used')); print('- Error:', r.get('error') or 'none')" "$RESULT_FILE"
+            python -c "import json,sys; r=json.load(open(sys.argv[1])); print('- Root cause:', r.get('root_cause') or 'n/a'); print('- Fix attempts used:', r.get('fixes_used')); print('- Error:', r.get('error') or 'none'); print('- Langfuse trace:', r.get('trace_url') or 'none (tracing off or unreachable; see the [langfuse] lines in the log)')" "$RESULT_FILE"
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 

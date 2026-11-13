@@ -99,6 +99,7 @@ def main():
     print(f"Image: {runner.image}")
     print(f"Test:  {runner.test_command}")
     print("Workflow: LangGraph")
+    print(observability.startup_report())
 
     try:
         with observability.run_trace(
@@ -124,8 +125,10 @@ def main():
     finally:
         observability.flush()
 
+    if observability.trace_url():
+        print(f"[langfuse] trace: {observability.trace_url()}")
     if args.result_file:
-        write_result(args.result_file, build_result(final_state, args.model))
+        write_result(args.result_file, {**build_result(final_state, args.model), "trace_url": observability.trace_url()})
 
     if final_state["status"] not in ("success", "already_passing"):
         if final_state.get("error"):

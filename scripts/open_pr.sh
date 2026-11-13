@@ -32,6 +32,8 @@ print(f"**Root cause:** {r.get('root_cause') or 'n/a'}\n")
 print(f"**Fix attempts used:** {r.get('fixes_used')}  |  **Edits that failed to apply:** {r.get('apply_failures')}")
 for note in r.get("attempt_notes") or []:
     print(f"- {note}")
+if r.get("trace_url"):
+    print(f"\nLangfuse trace: {r['trace_url']}")
 print(f"\nModel: `{r.get('model')}`. Review the diff before merging; the tests passed in a container after this change.")
 PY
 ROOT_CAUSE="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('root_cause') or '')" "$RESULT")"
