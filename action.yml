@@ -1,0 +1,164 @@
+name: Self-healing CI
+description: When the tests fail, diagnose and fix them with Claude in a container, then open a pull request with the fix.
+author: self-healing-ci
+branding:
+  icon: tool
+  color: green
+
+inputs:
+  test-cmd:
+    description: Shell command that runs the tests inside the container (for example "pytest -q").
+    required: true
+  setup-cmd:
+    description: Shell command run once to build a cached environment image (for example "pip install -r requirements.txt").
+    required: false
+    default: ""
+  image:
+    description: Docker base image the tests run in (for example python:3.11). Empty = auto-detect.
+    required: false
+    default: ""
+  max-attempts:
+    description: Maximum fix attempts (plus one final verification run).
+    required: false
+    default: "3"
+  model:
+    description: Anthropic model used to generate fixes.
+    required: false
+    default: claude-sonnet-5-5
+  anthropic-api-key:
+    description: Anthropic API key. Pass it from a repository or organization secret.
+    required: true
+  github-token:
+    description: Token with contents:write and pull-requests:write, used to push the fix branch and open the PR.
+    required: true
+  branch:
+    description: Branch whose tests failed. Default is the branch of the triggering run (github.ref_name).
+    required: false
+    default: ""
+  create-pr:
+    description: Open a pull request when a fix is found ("true" or "false").
+    required: false
+    default: "true"
+  fail-if-unhealed:
+    description: Fail this job when no fix could be found ("true" or "false").
+    required: false
+    default: "true"
+  langfuse-public-key:
+    description: Optional Langfuse public key (enables tracing).
+    required: false
+    default: ""
+  langfuse-secret-key:
+    description: Optional Langfuse secret key.
+    required: false
+    default: ""
+  langfuse-base-url:
+    description: Optional Langfuse host, for example https://jp.cloud.langfuse.com.
+    required: false
+    default: ""
+
+outputs:
+  status:
+    description: Result of the run (success, already_passing, verification_failed, patch_error, ...).
+    value: ${{ steps.heal.outputs.status }}
+  pr-url:
+    description: URL of the pull request with the fix, when one was opened.
+    value: ${{ steps.pr.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve branch and loop guard
+      id: guard
+      shell: bash
+      env:
+        INPUT_BRANCH: ${{ inputs.branch }}
+        REF_NAME: ${{ github.ref_name }}
+      run: |
+        BRANCH="${INPUT_BRANCH:-$REF_NAME}"
+        echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+        case "$BRANCH" in
+          self-healing/*)
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Branch '$BRANCH' is itself a self-healing branch; skipping to avoid a loop."
+            ;;
+          *)
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    - name: Set up Python
+      if: steps.guard.outputs.skip != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install self-healing-ci
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      run: pip install --quiet -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    - name: Diagnose and fix
+      id: heal
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        LANGFUSE_PUBLIC_KEY: ${{ inputs.langfuse-public-key }}
+        LANGFUSE_SECRET_KEY: ${{ inputs.langfuse-secret-key }}
+        LANGFUSE_BASE_URL: ${{ inputs.langfuse-base-url }}
+        TEST_CMD: ${{ inputs.test-cmd }}
+        SETUP_CMD: ${{ inputs.setup-cmd }}
+        IMAGE: ${{ inputs.image }}
+        MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        MODEL: ${{ inputs.model }}
+        REPOSITORY: ${{ github.repository }}
+      run: |
+        RESULT="$RUNNER_TEMP/heal-result.json"
+        ARGS=("$GITHUB_WORKSPACE" --test-cmd "$TEST_CMD" --max-attempts "$MAX_ATTEMPTS" \
+              --model "$MODEL" --result-file "$RESULT" --trace-tag "gha:$REPOSITORY")
+        if [ -n "$SETUP_CMD" ]; then ARGS+=(--setup-cmd "$SETUP_CMD"); fi
+        if [ -n "$IMAGE" ]; then ARGS+=(--image "$IMAGE"); fi
+        set +e
+        python "$GITHUB_ACTION_PATH/heal.py" "${ARGS[@]}"
+        EXIT_CODE=$?
+        set -e
+        STATUS="$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('status','unknown'))" "$RESULT" 2>/dev/null || echo unknown)"
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "result_file=$RESULT" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+    - name: Open pull request with the fix
+      id: pr
+      if: steps.guard.outputs.skip != 'true' && inputs.create-pr == 'true' && steps.heal.outputs.status == 'success'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        HEAL_BRANCH: ${{ steps.guard.outputs.branch }}
+        HEAL_RESULT_FILE: ${{ steps.heal.outputs.result_file }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/open_pr.sh"
+
+    - name: Summary
+      if: always() && steps.guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        STATUS: ${{ steps.heal.outputs.status }}
+        RESULT_FILE: ${{ steps.heal.outputs.result_file }}
+        PR_URL: ${{ steps.pr.outputs.url }}
+      run: |
+        {
+          echo "### Self-healing CI"
+          echo "- Status: \`${STATUS:-unknown}\`"
+          if [ -n "${PR_URL:-}" ]; then echo "- Pull request: ${PR_URL}"; fi
+          if [ -n "${RESULT_FILE:-}" ] && [ -f "$RESULT_FILE" ]; then
+            python -c "import json,sys; r=json.load(open(sys.argv[1])); print('- Root cause:', r.get('root_cause') or 'n/a'); print('- Fix attempts used:', r.get('fixes_used')); print('- Error:', r.get('error') or 'none'); print('- Langfuse trace:', r.get('trace_url') or 'none (tracing off or unreachable; see the [langfuse] lines in the log)')" "$RESULT_FILE"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Fail if no fix was found
+      if: steps.guard.outputs.skip != 'true' && inputs.fail-if-unhealed == 'true' && steps.heal.outputs.status != 'success' && steps.heal.outputs.status != 'already_passing'
+      shell: bash
+      env:
+        STATUS: ${{ steps.heal.outputs.status }}
+      run: |
+        echo "::error::self-healing-ci could not fix the failing tests (status: ${STATUS:-unknown})."
+        exit 1

@@ -26,6 +26,7 @@ import os
 import sys
 
 from core import observability
+from core.result import build_result, write_result
 from core.docker_runner import DockerTestRunner
 from core.workflow import run_workflow
 
@@ -62,6 +63,11 @@ def main():
         default=[],
         help="Langfuse tag for this run (repeatable), e.g. the BugsInPy bug id",
     )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help="Write a JSON summary of the run here (used by the GitHub Action)",
+    )
     args = parser.parse_args()
 
     if args.max_attempts < 1:
@@ -93,6 +99,7 @@ def main():
     print(f"Image: {runner.image}")
     print(f"Test:  {runner.test_command}")
     print("Workflow: LangGraph")
+    print(observability.startup_report())
 
     try:
         with observability.run_trace(
@@ -112,9 +119,16 @@ def main():
             )
     except Exception as e:
         print(f"Workflow failed unexpectedly: {e}")
+        if args.result_file:
+            write_result(args.result_file, {"status": "crashed", "error": str(e), "model": args.model})
         sys.exit(1)
     finally:
         observability.flush()
+
+    if observability.trace_url():
+        print(f"[langfuse] trace: {observability.trace_url()}")
+    if args.result_file:
+        write_result(args.result_file, {**build_result(final_state, args.model), "trace_url": observability.trace_url()})
 
     if final_state["status"] not in ("success", "already_passing"):
         if final_state.get("error"):

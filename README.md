@@ -229,6 +229,42 @@ Each `heal.py` run is one trace (`self-heal`) with spans `run-tests`,
 generation per model call. Add `--trace-tag <name>` (repeatable) to label a run,
 for example with a BugsInPy bug id.
 
+## GitHub Action (open a PR when CI fails)
+
+`action.yml` at the repo root is a composite action. In the repository you want healed, copy
+`examples/self-heal.yml` to `.github/workflows/self-heal.yml` and set `test-cmd` (and `setup-cmd`,
+`image`). When the tests fail, the action runs `heal.py` on the runner, and if a fix is found it
+pushes `self-healing/<branch>` and opens (or updates) a pull request into `<branch>`.
+
+### Action inputs
+
+Set these under `with:` in the workflow that calls the action (`.github/workflows/self-heal.yml`).
+Defaults live in `action.yml`.
+
+| Input | Required | Default | What it does |
+|---|---|---|---|
+| `test-cmd` | yes | | Command that runs the tests inside the container, e.g. `python -m pytest -q` |
+| `setup-cmd` | no | none | Run once to build a cached environment image, e.g. `pip install -r requirements.txt` |
+| `image` | no | auto-detect | Docker base image the tests run in, e.g. `python:3.11` |
+| `max-attempts` | no | `3` | Fix attempts before giving up (plus one final verification run) |
+| `model` | no | `claude-sonnet-5-5` | Anthropic model used to generate fixes |
+| `anthropic-api-key` | yes | | Pass `${{ secrets.ANTHROPIC_API_KEY }}` |
+| `github-token` | yes | | Token that pushes the branch and opens the PR, usually `${{ secrets.GITHUB_TOKEN }}` |
+| `branch` | no | triggering branch | Branch whose tests failed; the fix goes to `self-healing/<branch>` |
+| `create-pr` | no | `true` | Open a pull request when a fix is found |
+| `fail-if-unhealed` | no | `true` | Fail the job when no fix could be found |
+| `langfuse-public-key`, `langfuse-secret-key`, `langfuse-base-url` | no | off | Enable Langfuse tracing |
+
+The apply-retry limit (how many rejected edits are retried per run) is not an input; it is the
+constant `MAX_APPLY_FAILURES` (2) in `core/workflow.py`.
+
+- Run it by hand first (`workflow_dispatch`), then enable the `workflow_run` trigger.
+- Loop guard: it never runs for a branch that starts with `self-healing/`.
+- Secrets: pass `ANTHROPIC_API_KEY` (and optionally the Langfuse keys) from repository secrets.
+- Repo setting: "Allow GitHub Actions to create and approve pull requests" must be on.
+- `heal.py --result-file result.json` writes a JSON summary (status, attempts, root cause) that the
+  action uses for the PR body.
+
 ## Review changes carefully
 
 The target repository is mounted read-write. LLM patch application can modify

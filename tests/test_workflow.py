@@ -4,6 +4,7 @@ from pathlib import Path
 from core.context_extractor import extract_failure_context
 from core.models import PatchPlan, ProposedPatch
 from core.workflow import run_workflow
+from tests.sample_repos import requires_sample
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -143,6 +144,7 @@ def test_patch_application_failure_retries_with_feedback_then_stops():
     assert feedbacks[0] == "" and "snippet not found" in feedbacks[1]
 
 
+@requires_sample("sample-business-repo")
 def test_business_repo_multi_file_context_and_fix_loop():
     repo = PROJECT_ROOT / "sample-business-repo"
     output = """
